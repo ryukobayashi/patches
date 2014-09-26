@@ -1,0 +1,201 @@
+diff --git hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/policies/ComputeFairShares.java hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/policies/ComputeFairShares.java
+index 77dad49..7dabd8c 100644
+--- hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/policies/ComputeFairShares.java
++++ hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/policies/ComputeFairShares.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies;
+ 
++import java.util.ArrayList;
+ import java.util.Collection;
+ 
+ import org.apache.hadoop.yarn.api.records.Resource;
+@@ -76,8 +77,12 @@ public class ComputeFairShares {
+    * iterations of binary search is a constant (dependent on desired precision).
+    */
+   public static void computeShares(
+-      Collection<? extends Schedulable> schedulables, Resource totalResources,
+-      ResourceType type) {
++      Collection<? extends Schedulable> allSchedulables,
++      Resource totalResources, ResourceType type) {
++    Collection<Schedulable> schedulables = new ArrayList<Schedulable>();
++    int takenResources = handleFixedFairShares(
++        allSchedulables, schedulables, type);
++
+     if (schedulables.isEmpty()) {
+       return;
+     }
+@@ -94,9 +99,11 @@ public class ComputeFairShares {
+         totalMaxShare += maxShare;
+       }
+     }
+-    int totalResource = Math.min(totalMaxShare,
+-        getResourceValue(totalResources, type));
+-    
++
++    int totalResource = Math.max((getResourceValue(totalResources, type) -
++        takenResources), 0);
++    totalResource = Math.min(totalMaxShare, totalResource);
++
+     double rMax = 1.0;
+     while (resourceUsedWithWeightToResourceRatio(rMax, schedulables, type)
+         < totalResource) {
+@@ -149,7 +156,55 @@ public class ComputeFairShares {
+     share = Math.min(share, getResourceValue(sched.getMaxShare(), type));
+     return (int) share;
+   }
+-  
++
++  /**
++   * Helper method to handle Schedulabes with fixed fairshares.
++   * Returns the resources taken by fixed fairshare schedulables,
++   * and adds the remaining to the passed nonFixedSchedulables.
++   */
++  private static int handleFixedFairShares(
++      Collection<? extends Schedulable> schedulables,
++      Collection<Schedulable> nonFixedSchedulables,
++      ResourceType type) {
++    int totalResource = 0;
++
++    for (Schedulable sched : schedulables) {
++      int fixedShare = getFairShareIfFixed(sched, type);
++      if (fixedShare < 0) {
++        nonFixedSchedulables.add(sched);
++      } else {
++        setResourceValue(fixedShare,
++            sched.getFairShare(),
++            type);
++        totalResource = (int) Math.min((long)totalResource + (long)fixedShare,
++            Integer.MAX_VALUE);
++      }
++    }
++    return totalResource;
++  }
++
++  /**
++   * Get the fairshare for the {@link Schedulable} if it is fixed, -1 otherwise.
++   *
++   * The fairshare is fixed if either the maxShare is 0 or weight is 0.
++   */
++  private static int getFairShareIfFixed(Schedulable sched,
++      ResourceType type) {
++
++    // Check if maxShare is 0
++    if (getResourceValue(sched.getMaxShare(), type) <= 0) {
++      return 0;
++    }
++
++    // Check if weight is 0
++    if (sched.getWeights().getWeight(type) <= 0) {
++      int minShare = getResourceValue(sched.getMinShare(), type);
++      return (minShare <= 0) ? 0 : minShare;
++    }
++
++    return -1;
++  }
++
+   private static int getResourceValue(Resource resource, ResourceType type) {
+     switch (type) {
+     case MEMORY:
+diff --git hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/test/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/TestFairScheduler.java hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/test/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/TestFairScheduler.java
+index 9e2d836..74ee2ef 100644
+--- hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/test/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/TestFairScheduler.java
++++ hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/test/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/TestFairScheduler.java
+@@ -302,7 +302,96 @@ public class TestFairScheduler extends FairSchedulerTestBase {
+       assertEquals(3414, p.getMetrics().getFairShareMB());
+     }
+   }
+-  
++
++  @Test
++  public void testFairShareWithZeroWeight() throws IOException {
++    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
++    // set queueA and queueB weight zero.
++    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
++    out.println("<?xml version=\"1.0\"?>");
++    out.println("<allocations>");
++    out.println("<queue name=\"queueA\">");
++    out.println("<weight>0.0</weight>");
++    out.println("</queue>");
++    out.println("<queue name=\"queueB\">");
++    out.println("<weight>0.0</weight>");
++    out.println("</queue>");
++    out.println("</allocations>");
++    out.close();
++
++    scheduler.reinitialize(conf, resourceManager.getRMContext());
++
++    // Add one big node (only care about aggregate capacity)
++    RMNode node1 =
++        MockNodes.newNodeInfo(1, Resources.createResource(8 * 1024, 8), 1,
++            "127.0.0.1");
++    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
++    scheduler.handle(nodeEvent1);
++
++    // Queue A wants 2 * 1024.
++    createSchedulingRequest(2 * 1024, "queueA", "user1");
++    // Queue B wants 6 * 1024
++    createSchedulingRequest(6 * 1024, "queueB", "user1");
++
++    scheduler.update();
++
++    FSLeafQueue queue = scheduler.getQueueManager().getLeafQueue(
++        "queueA", false);
++    // queueA's weight is 0.0, so its fair share should be 0.
++    assertEquals(0, queue.getFairShare().getMemory());
++    // queueB's weight is 0.0, so its fair share should be 0.
++    queue = scheduler.getQueueManager().getLeafQueue(
++        "queueB", false);
++    assertEquals(0, queue.getFairShare().getMemory());
++  }
++
++  @Test
++  public void testFairShareWithZeroWeightNoneZeroMinRes() throws IOException {
++    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
++    // set queueA and queueB weight zero.
++    // set queueA and queueB minResources 1.
++    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
++    out.println("<?xml version=\"1.0\"?>");
++    out.println("<allocations>");
++    out.println("<queue name=\"queueA\">");
++    out.println("<minResources>1 mb 1 vcores</minResources>");
++    out.println("<weight>0.0</weight>");
++    out.println("</queue>");
++    out.println("<queue name=\"queueB\">");
++    out.println("<minResources>1 mb 1 vcores</minResources>");
++    out.println("<weight>0.0</weight>");
++    out.println("</queue>");
++    out.println("</allocations>");
++    out.close();
++
++    scheduler.reinitialize(conf, resourceManager.getRMContext());
++
++    // Add one big node (only care about aggregate capacity)
++    RMNode node1 =
++        MockNodes.newNodeInfo(1, Resources.createResource(8 * 1024, 8), 1,
++            "127.0.0.1");
++    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
++    scheduler.handle(nodeEvent1);
++
++    // Queue A wants 2 * 1024.
++    createSchedulingRequest(2 * 1024, "queueA", "user1");
++    // Queue B wants 6 * 1024
++    createSchedulingRequest(6 * 1024, "queueB", "user1");
++
++    scheduler.update();
++
++    FSLeafQueue queue = scheduler.getQueueManager().getLeafQueue(
++        "queueA", false);
++    // queueA's weight is 0.0 and minResources is 1,
++    // so its fair share should be 1 (minShare).
++    assertEquals(1, queue.getFairShare().getMemory());
++    // queueB's weight is 0.0 and minResources is 1,
++    // so its fair share should be 1 (minShare).
++    queue = scheduler.getQueueManager().getLeafQueue(
++        "queueB", false);
++    assertEquals(1, queue.getFairShare().getMemory());
++  }
++
+   @Test
+   public void testSimpleHierarchicalFairShareCalculation() throws IOException {
+     scheduler.init(conf);
