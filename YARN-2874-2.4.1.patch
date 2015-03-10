@@ -1,0 +1,42 @@
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java
+index 38e9089..1f8ec49 100644
+--- hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java
++++ hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java
+@@ -37,6 +37,7 @@ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.locks.ReadWriteLock;
+ import java.util.concurrent.locks.ReentrantReadWriteLock;
+ 
+@@ -407,15 +408,15 @@ public class DelegationTokenRenewer extends AbstractService {
+    */
+   private class RenewalTimerTask extends TimerTask {
+     private DelegationTokenToRenew dttr;
+-    private boolean cancelled = false;
++    private AtomicBoolean cancelled = new AtomicBoolean(false);
+     
+     RenewalTimerTask(DelegationTokenToRenew t) {  
+       dttr = t;  
+     }
+     
+     @Override
+-    public synchronized void run() {
+-      if (cancelled) {
++    public void run() {
++      if (cancelled.get()) {
+         return;
+       }
+ 
+@@ -435,8 +436,8 @@ public class DelegationTokenRenewer extends AbstractService {
+     }
+ 
+     @Override
+-    public synchronized boolean cancel() {
+-      cancelled = true;
++    public boolean cancel() {
++      cancelled.set(true);
+       return super.cancel();
+     }
+   }
