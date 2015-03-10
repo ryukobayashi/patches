@@ -1,0 +1,171 @@
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairScheduler.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairScheduler.java
+index 7dcbe91..fbc9df3 100644
+--- hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairScheduler.java
++++ hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairScheduler.java
+@@ -142,7 +142,7 @@ public class FairScheduler extends AbstractYarnScheduler {
+   public static final Resource CONTAINER_RESERVED = Resources.createResource(-1);
+ 
+   // How often fair shares are re-calculated (ms)
+-  protected long UPDATE_INTERVAL = 500;
++  protected long updateInterval;
+ 
+   // Aggregate metrics
+   FSQueueMetrics rootMetrics;
+@@ -265,13 +265,13 @@ public class FairScheduler extends AbstractYarnScheduler {
+ 
+   /**
+    * A runnable which calls {@link FairScheduler#update()} every
+-   * <code>UPDATE_INTERVAL</code> milliseconds.
++   * <code>updateInterval</code> milliseconds.
+    */
+   private class UpdateThread implements Runnable {
+     public void run() {
+       while (true) {
+         try {
+-          Thread.sleep(UPDATE_INTERVAL);
++          Thread.sleep(updateInterval);
+           update();
+           preemptTasksIfNecessary();
+         } catch (Exception e) {
+@@ -544,6 +544,10 @@ public class FairScheduler extends AbstractYarnScheduler {
+     return minimumAllocation;
+   }
+ 
++  private FSSchedulerNode getFSSchedulerNode(NodeId nodeId) {
++    return nodes.get(nodeId);
++  }
++
+   public Resource getIncrementResourceCapability() {
+     return incrAllocation;
+   }
+@@ -997,37 +1001,27 @@ public class FairScheduler extends AbstractYarnScheduler {
+     }
+   }
+ 
+-  private void continuousScheduling() {
+-    while (true) {
+-      List<NodeId> nodeIdList = new ArrayList<NodeId>(nodes.keySet());
+-      // Sort the nodes by space available on them, so that we offer
+-      // containers on emptier nodes first, facilitating an even spread. This
+-      // requires holding the scheduler lock, so that the space available on a
+-      // node doesn't change during the sort.
+-      synchronized (this) {
+-        Collections.sort(nodeIdList, nodeAvailableResourceComparator);
+-      }
++  void continuousSchedulingAttempt() throws InterruptedException {
++    List<NodeId> nodeIdList = new ArrayList<NodeId>(nodes.keySet());
++    // Sort the nodes by space available on them, so that we offer
++    // containers on emptier nodes first, facilitating an even spread. This
++    // requires holding the scheduler lock, so that the space available on a
++    // node doesn't change during the sort.
++    synchronized (this) {
++      Collections.sort(nodeIdList, nodeAvailableResourceComparator);
++    }
+ 
+-      // iterate all nodes
+-      for (NodeId nodeId : nodeIdList) {
+-        if (nodes.containsKey(nodeId)) {
+-          FSSchedulerNode node = nodes.get(nodeId);
+-          try {
+-            if (Resources.fitsIn(minimumAllocation,
+-                    node.getAvailableResource())) {
+-              attemptScheduling(node);
+-            }
+-          } catch (Throwable ex) {
+-            LOG.warn("Error while attempting scheduling for node " + node +
+-                    ": " + ex.toString(), ex);
+-          }
+-        }
+-      }
++    // iterate all nodes
++    for (NodeId nodeId : nodeIdList) {
++      FSSchedulerNode node = getFSSchedulerNode(nodeId);
+       try {
+-        Thread.sleep(getContinuousSchedulingSleepMs());
+-      } catch (InterruptedException e) {
+-        LOG.warn("Error while doing sleep in continuous scheduling: " +
+-                e.toString(), e);
++        if (node != null && Resources.fitsIn(minimumAllocation,
++            node.getAvailableResource())) {
++          attemptScheduling(node);
++        }
++      } catch (Throwable ex) {
++        LOG.error("Error while attempting scheduling for node " + node +
++            ": " + ex.toString(), ex);
+       }
+     }
+   }
+@@ -1037,6 +1031,12 @@ public class FairScheduler extends AbstractYarnScheduler {
+ 
+     @Override
+     public int compare(NodeId n1, NodeId n2) {
++      if (!nodes.containsKey(n1)) {
++        return 1;
++      }
++      if (!nodes.containsKey(n2)) {
++        return -1;
++      }
+       return RESOURCE_CALCULATOR.compare(clusterCapacity,
+               nodes.get(n2).getAvailableResource(),
+               nodes.get(n1).getAvailableResource());
+@@ -1250,6 +1250,15 @@ public class FairScheduler extends AbstractYarnScheduler {
+       preemptionInterval = this.conf.getPreemptionInterval();
+       waitTimeBeforeKill = this.conf.getWaitTimeBeforeKill();
+       usePortForNodeName = this.conf.getUsePortForNodeName();
++
++      updateInterval = this.conf.getUpdateInterval();
++      if (updateInterval < 0) {
++        updateInterval = FairSchedulerConfiguration.DEFAULT_UPDATE_INTERVAL_MS;
++        LOG.warn(FairSchedulerConfiguration.UPDATE_INTERVAL_MS
++                + " is invalid, so using default value " +
++                + FairSchedulerConfiguration.DEFAULT_UPDATE_INTERVAL_MS
++                + " ms instead");
++      }
+       
+       rootMetrics = FSQueueMetrics.forQueue("root", null, true, conf);
+       this.rmContext = rmContext;
+@@ -1279,7 +1288,16 @@ public class FairScheduler extends AbstractYarnScheduler {
+           new Runnable() {
+             @Override
+             public void run() {
+-              continuousScheduling();
++              while (!Thread.currentThread().isInterrupted()) {
++                try {
++                  continuousSchedulingAttempt();
++                  Thread.sleep(getContinuousSchedulingSleepMs());
++                } catch (InterruptedException e) {
++                  LOG.error("Continuous scheduling thread interrupted. Exiting. ",
++                      e);
++                  return;
++                }
++              }
+             }
+           }
+         );
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairSchedulerConfiguration.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairSchedulerConfiguration.java
+index e271b05..049baff 100644
+--- hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairSchedulerConfiguration.java
++++ hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/scheduler/fair/FairSchedulerConfiguration.java
+@@ -119,6 +119,11 @@ public class FairSchedulerConfiguration extends Configuration {
+   protected static final String MAX_ASSIGN = CONF_PREFIX + "max.assign";
+   protected static final int DEFAULT_MAX_ASSIGN = -1;
+ 
++  /** The update interval for calculating resources in FairScheduler .*/
++  public static final String UPDATE_INTERVAL_MS =
++      CONF_PREFIX + "update-interval-ms";
++  public static final int DEFAULT_UPDATE_INTERVAL_MS  = 500;
++
+   public FairSchedulerConfiguration() {
+     super();
+   }
+@@ -238,6 +243,10 @@ public class FairSchedulerConfiguration extends Configuration {
+           "Error reading resource config", ex);
+     }
+   }
++
++  public long getUpdateInterval() {
++    return getLong(UPDATE_INTERVAL_MS, DEFAULT_UPDATE_INTERVAL_MS);
++  }
+   
+   private static int findResource(String val, String units)
+     throws AllocationConfigurationException {
