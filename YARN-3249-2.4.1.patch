@@ -1,0 +1,393 @@
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-api/src/main/java/org/apache/hadoop/yarn/conf/YarnConfiguration.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-api/src/main/java/org/apache/hadoop/yarn/conf/YarnConfiguration.java
+index 7ad8da8..153299e 100644
+--- hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-api/src/main/java/org/apache/hadoop/yarn/conf/YarnConfiguration.java
++++ hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-api/src/main/java/org/apache/hadoop/yarn/conf/YarnConfiguration.java
+@@ -176,6 +176,12 @@ public class YarnConfiguration extends Configuration {
+   public static final boolean DEFAULT_RM_SCHEDULER_USE_PORT_FOR_NODE_NAME = 
+       false;
+ 
++  /** Enable Resource Manager webapp ui actions */
++  public static final String RM_WEBAPP_UI_ACTIONS_ENABLED =
++    RM_PREFIX + "webapp.ui-actions.enabled";
++  public static final boolean DEFAULT_RM_WEBAPP_UI_ACTIONS_ENABLED =
++    true;
++
+   /**
+    * Enable periodic monitor threads.
+    * @see #RM_SCHEDULER_MONITOR_POLICIES
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/AppBlock.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/AppBlock.java
+index c4eecb9..28da9f5 100644
+--- hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/AppBlock.java
++++ hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/AppBlock.java
+@@ -34,6 +34,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
+ import org.apache.hadoop.yarn.api.records.ApplicationId;
+ import org.apache.hadoop.yarn.api.records.QueueACL;
+ import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
++import org.apache.hadoop.yarn.conf.YarnConfiguration;
+ import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
+ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
+@@ -59,6 +60,7 @@ public class AppBlock extends HtmlBlock {
+   private ApplicationACLsManager aclsManager;
+   private QueueACLsManager queueACLsManager;
+   private final Configuration conf;
++  private final boolean rmWebAppUIActions;
+ 
+   @Inject
+   AppBlock(ResourceManager rm, ViewContext ctx,
+@@ -68,6 +70,9 @@ public class AppBlock extends HtmlBlock {
+     this.aclsManager = aclsManager;
+     this.queueACLsManager = queueACLsManager;
+     this.conf = conf;
++    this.rmWebAppUIActions =
++        conf.getBoolean(YarnConfiguration.RM_WEBAPP_UI_ACTIONS_ENABLED,
++                YarnConfiguration.DEFAULT_RM_WEBAPP_UI_ACTIONS_ENABLED);
+   }
+ 
+   @Override
+@@ -112,6 +117,36 @@ public class AppBlock extends HtmlBlock {
+ 
+     setTitle(join("Application ", aid));
+ 
++    if (rmWebAppUIActions) {
++      // Application Kill
++      html.div()
++        .button()
++          .$onclick("confirmAction()").b("Kill Application")._()
++        ._();
++
++      StringBuilder script = new StringBuilder();
++      script.append("function confirmAction() {")
++            .append(" b = confirm(\"Are you sure?\");")
++            .append(" if (b == true) {")
++            .append(" $.ajax({")
++            .append(" type: 'PUT',")
++            .append(" url: '/ws/v1/cluster/apps/").append(aid).append("/state',")
++            .append(" contentType: 'application/json',")
++            .append(" data: '{\"state\":\"KILLED\"}',")
++            .append(" dataType: 'json'")
++            .append(" }).done(function(data){")
++            .append(" setTimeout(function(){")
++            .append(" location.href = '/cluster/app/").append(aid).append("';")
++            .append(" }, 1000);")
++            .append(" }).fail(function(data){")
++            .append(" console.log(data);")
++            .append(" });")
++            .append(" }")
++            .append("}");
++
++      html.script().$type("text/javascript")._(script.toString())._();
++    }
++
+     RMAppMetrics appMerics = rmApp.getRMAppMetrics();
+     RMAppAttemptMetrics attemptMetrics =
+         rmApp.getCurrentAppAttempt().getRMAppAttemptMetrics();
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/RMWebServices.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/RMWebServices.java
+index 56eba34..6848467 100644
+--- hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/RMWebServices.java
++++ hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/RMWebServices.java
+@@ -19,6 +19,10 @@
+ package org.apache.hadoop.yarn.server.resourcemanager.webapp;
+ 
+ import java.io.IOException;
++import java.lang.reflect.UndeclaredThrowableException;
++import java.security.AccessControlException;
++import java.security.Principal;
++import java.security.PrivilegedExceptionAction;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.EnumSet;
+@@ -31,19 +35,28 @@ import java.util.concurrent.ConcurrentMap;
+ 
+ import javax.servlet.http.HttpServletRequest;
+ import javax.servlet.http.HttpServletResponse;
++import javax.ws.rs.Consumes;
+ import javax.ws.rs.GET;
++import javax.ws.rs.PUT;
+ import javax.ws.rs.Path;
+ import javax.ws.rs.PathParam;
+ import javax.ws.rs.Produces;
+ import javax.ws.rs.QueryParam;
+ import javax.ws.rs.core.Context;
++import javax.ws.rs.core.HttpHeaders;
+ import javax.ws.rs.core.MediaType;
++import javax.ws.rs.core.Response;
++import javax.ws.rs.core.Response.Status;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.CommonConfigurationKeys;
+ import org.apache.hadoop.security.UserGroupInformation;
++import org.apache.hadoop.security.authorize.AuthorizationException;
+ import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationsRequest;
++import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationRequest;
++import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationResponse;
+ import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
+ import org.apache.hadoop.yarn.api.records.ApplicationId;
+ import org.apache.hadoop.yarn.api.records.ApplicationReport;
+@@ -56,6 +69,8 @@ import org.apache.hadoop.yarn.exceptions.YarnException;
+ import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+ import org.apache.hadoop.yarn.factories.RecordFactory;
+ import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
++import org.apache.hadoop.yarn.server.resourcemanager.RMAuditLogger;
++import org.apache.hadoop.yarn.server.resourcemanager.RMAuditLogger.AuditConstants;
+ import org.apache.hadoop.yarn.server.resourcemanager.RMServerUtils;
+ import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
+ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+@@ -66,10 +81,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
+ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
+ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler;
+-import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppAttemptInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppAttemptsInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppInfo;
++import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppState;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ApplicationStatisticsInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppsInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.CapacitySchedulerInfo;
+@@ -82,7 +97,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.NodesInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.SchedulerInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.SchedulerTypeInfo;
+ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.StatisticsItemInfo;
+-import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
+ import org.apache.hadoop.yarn.util.ConverterUtils;
+ import org.apache.hadoop.yarn.webapp.BadRequestException;
+ import org.apache.hadoop.yarn.webapp.NotFoundException;
+@@ -584,4 +598,183 @@ public class RMWebServices {
+ 
+     return appAttemptsInfo;
+   }
++
++  @GET
++  @Path("/apps/{appid}/state")
++  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
++  public AppState getAppState(@Context HttpServletRequest hsr,
++      @PathParam("appid") String appId) throws AuthorizationException {
++    init();
++    UserGroupInformation callerUGI = getCallerUserGroupInformation(hsr, true);
++    String userName = "";
++    if (callerUGI != null) {
++      userName = callerUGI.getUserName();
++    }
++    RMApp app = null;
++    try {
++      app = getRMAppForAppId(appId);
++    } catch (NotFoundException e) {
++      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
++        "UNKNOWN", "RMWebService",
++        "Trying to get state of an absent application " + appId);
++      throw e;
++    }
++
++    AppState ret = new AppState();
++    ret.setState(app.getState().toString());
++
++    return ret;
++  }
++
++  // can't return POJO because we can't control the status code
++  // it's always set to 200 when we need to allow it to be set
++  // to 202
++
++  @PUT
++  @Path("/apps/{appid}/state")
++  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
++  @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
++  public Response updateAppState(AppState targetState,
++      @Context HttpServletRequest hsr, @PathParam("appid") String appId)
++      throws AuthorizationException, YarnException, InterruptedException,
++      IOException {
++
++    init();
++    UserGroupInformation callerUGI = getCallerUserGroupInformation(hsr, true);
++    if (callerUGI == null) {
++      String msg = "Unable to obtain user name, user not authenticated";
++      throw new AuthorizationException(msg);
++    }
++
++    if (UserGroupInformation.isSecurityEnabled() && isStaticUser(callerUGI)) {
++      String msg = "The default static user cannot carry out this operation.";
++      return Response.status(Status.FORBIDDEN).entity(msg).build();
++    }
++
++    String userName = callerUGI.getUserName();
++    RMApp app = null;
++    try {
++      app = getRMAppForAppId(appId);
++    } catch (NotFoundException e) {
++      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
++        "UNKNOWN", "RMWebService", "Trying to kill an absent application "
++            + appId);
++      throw e;
++    }
++
++    if (!app.getState().toString().equals(targetState.getState())) {
++      // user is attempting to change state. right we only
++      // allow users to kill the app
++
++      if (targetState.getState().equals(YarnApplicationState.KILLED.toString())) {
++        return killApp(app, callerUGI, hsr);
++      }
++      throw new BadRequestException("Only '"
++          + YarnApplicationState.KILLED.toString()
++          + "' is allowed as a target state.");
++    }
++
++    AppState ret = new AppState();
++    ret.setState(app.getState().toString());
++
++    return Response.status(Status.OK).entity(ret).build();
++  }
++
++  protected Response killApp(RMApp app, UserGroupInformation callerUGI,
++      HttpServletRequest hsr) throws IOException, InterruptedException {
++
++    if (app == null) {
++      throw new IllegalArgumentException("app cannot be null");
++    }
++    String userName = callerUGI.getUserName();
++    final ApplicationId appid = app.getApplicationId();
++    KillApplicationResponse resp = null;
++    try {
++      resp =
++          callerUGI
++            .doAs(new PrivilegedExceptionAction<KillApplicationResponse>() {
++              @Override
++              public KillApplicationResponse run() throws IOException,
++                  YarnException {
++                KillApplicationRequest req =
++                    KillApplicationRequest.newInstance(appid);
++                return rm.getClientRMService().forceKillApplication(req);
++              }
++            });
++    } catch (UndeclaredThrowableException ue) {
++      // if the root cause is a permissions issue
++      // bubble that up to the user
++      if (ue.getCause() instanceof YarnException) {
++        YarnException ye = (YarnException) ue.getCause();
++        if (ye.getCause() instanceof AccessControlException) {
++          String appId = app.getApplicationId().toString();
++          String msg =
++              "Unauthorized attempt to kill appid " + appId
++                  + " by remote user " + userName;
++          return Response.status(Status.FORBIDDEN).entity(msg).build();
++        } else {
++          throw ue;
++        }
++      } else {
++        throw ue;
++      }
++    }
++
++    AppState ret = new AppState();
++    ret.setState(app.getState().toString());
++
++    if (resp.getIsKillCompleted()) {
++      RMAuditLogger.logSuccess(userName, AuditConstants.KILL_APP_REQUEST,
++        "RMWebService", app.getApplicationId());
++    } else {
++      return Response.status(Status.ACCEPTED).entity(ret)
++        .header(HttpHeaders.LOCATION, hsr.getRequestURL()).build();
++    }
++    return Response.status(Status.OK).entity(ret).build();
++  }
++
++  private RMApp getRMAppForAppId(String appId) {
++
++    if (appId == null || appId.isEmpty()) {
++      throw new NotFoundException("appId, " + appId + ", is empty or null");
++    }
++    ApplicationId id;
++    try {
++      id = ConverterUtils.toApplicationId(recordFactory, appId);
++    } catch (NumberFormatException e) {
++      throw new NotFoundException("appId is invalid");
++    }
++    if (id == null) {
++      throw new NotFoundException("appId is invalid");
++    }
++    RMApp app = rm.getRMContext().getRMApps().get(id);
++    if (app == null) {
++      throw new NotFoundException("app with id: " + appId + " not found");
++    }
++    return app;
++  }
++
++  private UserGroupInformation getCallerUserGroupInformation(
++      HttpServletRequest hsr, boolean usePrincipal) {
++
++    String remoteUser = hsr.getRemoteUser();
++    if (usePrincipal) {
++      Principal princ = hsr.getUserPrincipal();
++      remoteUser = princ == null ? null : princ.getName();
++    }
++
++    UserGroupInformation callerUGI = null;
++    if (remoteUser != null) {
++      callerUGI = UserGroupInformation.createRemoteUser(remoteUser);
++    }
++
++    return callerUGI;
++  }
++
++  private boolean isStaticUser(UserGroupInformation callerUGI) {
++    String staticUser =
++        conf.get(CommonConfigurationKeys.HADOOP_HTTP_STATIC_USER,
++          CommonConfigurationKeys.DEFAULT_HADOOP_HTTP_STATIC_USER);
++    return staticUser.equals(callerUGI.getUserName());
++  }
+ }
+diff --git hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/dao/AppState.java hadoop-2.4.0.2.1.5.0-695-patch/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/dao/AppState.java
+new file mode 100644
+index 0000000..e8f1cc3
+--- /dev/null
++++ hadoop-2.4.0.2.1.5.0-695-src/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/dao/AppState.java
+@@ -0,0 +1,46 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.yarn.server.resourcemanager.webapp.dao;
++
++import javax.xml.bind.annotation.XmlAccessType;
++import javax.xml.bind.annotation.XmlAccessorType;
++import javax.xml.bind.annotation.XmlRootElement;
++
++@XmlRootElement(name = "appstate")
++@XmlAccessorType(XmlAccessType.FIELD)
++public class AppState {
++
++  String state;
++
++  public AppState() {
++  }
++
++  public AppState(String state) {
++    this.state = state;
++  }
++
++  public void setState(String state) {
++    this.state = state;
++  }
++
++  public String getState() {
++    return this.state;
++  }
++
++}
